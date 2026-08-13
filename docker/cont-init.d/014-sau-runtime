@@ -1,0 +1,19 @@
+#!/command/with-contenv sh
+set -eu
+
+# The image is built with hermes UID/GID 10000, but deployments may remap the
+# account at startup. Only the SAU runtime directories are writable; source,
+# its isolated venv, and the browser build remain read-only.
+[ -d /opt/social-auto-upload ] || exit 0
+
+install -d -o hermes -g hermes \
+    /opt/social-auto-upload/logs \
+    /opt/social-auto-upload/cookies \
+    /opt/data/.config \
+    /opt/data/.cache/sau \
+    /opt/data/.local/share/sau
+
+chown -R hermes:hermes \
+    /opt/social-auto-upload/logs \
+    /opt/social-auto-upload/cookies \
+    2>/dev/null || true

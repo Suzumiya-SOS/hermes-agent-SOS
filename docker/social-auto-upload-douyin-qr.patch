@@ -1,0 +1,123 @@
+diff --git a/uploader/douyin_uploader/main.py b/uploader/douyin_uploader/main.py
+index a4f8e8b..88befde 100644
+--- a/uploader/douyin_uploader/main.py
++++ b/uploader/douyin_uploader/main.py
+@@ -68,7 +68,7 @@ async def cookie_auth(account_file):
+     # 即便有头，页面慢/瞬时跳转仍会让 wait_for_url(精确URL,5s) 误判→重试3次+宽松判定(URL含 content/upload 且无登录文案)。
+     # 允许 linux server 用户通过 env var 强制无头: DOUYIN_COOKIE_AUTH_HEADLESS=true
+     use_headless = os.environ.get("DOUYIN_COOKIE_AUTH_HEADLESS", "").lower() in ("1", "true", "yes")
+-    launch_kwargs = {"headless": use_headless, "channel": "chrome", "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"]}
++    launch_kwargs = {"headless": use_headless, "channel": "chromium", "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"]}
+     for _attempt in range(3):
+         async with async_playwright() as playwright:
+             browser = await playwright.chromium.launch(**launch_kwargs)
+@@ -136,13 +136,45 @@ async def _extract_douyin_qrcode_src(page: Page) -> str:
+     raise RuntimeError(f"未获取到抖音登录二维码地址 (last_err={last_err})")
+ 
+ 
+-async def _save_douyin_qrcode(page: Page, account_file: str, previous_qrcode_path: Path | None = None, qrcode_callback=None) -> dict:
++async def _wait_for_douyin_qrcode_change(page: Page, previous_src: str, timeout_seconds: float = 15.0) -> str:
++    """Wait until Douyin replaces the expired QR image with a fresh one."""
++    selectors = [
++        'div#animate_qrcode_container img[src^="data:image"]',
++        'div[class*="animate_qrcode_container"] img[src^="data:image"]',
++        'div[class*="scan_qrcode_login_content"] img[src^="data:image"]',
++        'img[aria-label="二维码"]',
++    ]
++    loop = asyncio.get_running_loop()
++    deadline = loop.time() + timeout_seconds
++    while loop.time() < deadline:
++        for selector in selectors:
++            image = page.locator(selector).first
++            if not await image.count():
++                continue
++            try:
++                current_src = await image.get_attribute("src")
++            except Exception:
++                continue
++            if current_src and current_src != previous_src:
++                return current_src
++        await asyncio.sleep(0.25)
++    raise TimeoutError("点击刷新后抖音未生成新的二维码")
++
++
++async def _save_douyin_qrcode(
++    page: Page,
++    account_file: str,
++    previous_qrcode_path: Path | None = None,
++    qrcode_callback=None,
++    qrcode_src: str | None = None,
++) -> dict:
+     # 提取二维码 src 仅为了保存/终端显示；定位不到时不致命——有头浏览器里二维码可见，直接扫码即可
+-    try:
+-        qrcode_src = await _extract_douyin_qrcode_src(page)
+-    except Exception as exc:
+-        douyin_logger.warning(_msg("😵", f"没定位到二维码元素（{str(exc)[:50]}）——请直接在弹出的浏览器里扫码，小人继续等登录跳转"))
+-        return {"image_path": "", "image_data_url": ""}
++    if not qrcode_src:
++        try:
++            qrcode_src = await _extract_douyin_qrcode_src(page)
++        except Exception as exc:
++            douyin_logger.warning(_msg("😵", f"没定位到二维码元素（{str(exc)[:50]}）——请直接在弹出的浏览器里扫码，小人继续等登录跳转"))
++            return {"image_path": "", "image_data_url": ""}
+     qrcode_path = save_data_url_image(qrcode_src, build_login_qrcode_path(account_file))
+     if previous_qrcode_path and previous_qrcode_path != qrcode_path:
+         if remove_qrcode_file(previous_qrcode_path):
+@@ -189,7 +221,7 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
+     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
+     original_url = page.url
+     saw_2fa = False
+-    for _ in range(max_checks):
++    for check_index in range(max_checks):
+         if await _is_douyin_login_completed(page):
+             douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
+             return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
+@@ -199,7 +231,7 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
+             sms_input = page.locator('input[placeholder*="验证码"], input[type="tel"], input[placeholder*="短信"], input[placeholder*="手机号"]')
+             if await sms_input.count() > 0:
+                 if not saw_2fa:
+-                    douyin_logger.warning(_msg("⚠️", f"检测到抖音短信/安全二次验证，请在弹出的浏览器中手动输入。等待 sessionid ({i}/{max_checks})"))
++                    douyin_logger.warning(_msg("⚠️", f"检测到抖音短信/安全二次验证，请在弹出的浏览器中手动输入。等待 sessionid ({check_index + 1}/{max_checks})"))
+                     saw_2fa = True
+             await asyncio.sleep(poll_interval)
+             continue
+@@ -207,9 +239,21 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
+         expired_box = page.get_by_text("二维码失效", exact=True).locator("..").first
+         if await expired_box.count() and await expired_box.is_visible():
+             douyin_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
++            previous_src = qrcode_info.get("image_data_url", "")
+             await expired_box.click()
+-            await asyncio.sleep(1)
+-            qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
++            try:
++                fresh_src = await _wait_for_douyin_qrcode_change(page, previous_src)
++            except TimeoutError as exc:
++                douyin_logger.error(_msg("😢", f"二维码刷新失败: {exc}"))
++                await asyncio.sleep(poll_interval)
++                continue
++            qrcode_info = await _save_douyin_qrcode(
++                page,
++                account_file,
++                qrcode_path,
++                qrcode_callback=qrcode_callback,
++                qrcode_src=fresh_src,
++            )
+             qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
+ 
+         await asyncio.sleep(poll_interval)
+diff --git a/utils/login_qrcode.py b/utils/login_qrcode.py
+index 13c1cec..22810ff 100644
+--- a/utils/login_qrcode.py
++++ b/utils/login_qrcode.py
+@@ -10,7 +10,10 @@ import segno
+ 
+ def build_login_qrcode_path(account_file: str, suffix: str = "login_qrcode") -> Path:
+     account_path = Path(account_file)
+-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
++    # Include microseconds so a refreshed QR code always gets a new path.
++    # Reusing a filename within the same second lets chat clients and HTTP
++    # layers keep displaying the already-expired image from their cache.
++    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+     return account_path.with_name(f"{account_path.stem}_{suffix}_{timestamp}.png")
+ 
+ 

@@ -1,0 +1,33 @@
+services:
+  hermes-agent-sos:
+    build:
+      context: .
+    image: hermes-agent-sos:local
+    container_name: hermes-agent-sos
+    restart: unless-stopped
+    network_mode: host
+    shm_size: "2gb"
+    env_file:
+      - ./data/.env
+    environment:
+      HERMES_UID: "1000"
+      HERMES_GID: "1000"
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: "0.0.0.0"
+      HERMES_DASHBOARD_PORT: "9119"
+      DOUYIN_COOKIE_AUTH_HEADLESS: "true"
+    volumes:
+      - ./data:/opt/data
+      - /opt/ComfyUI-SOS/output:/workspace/comfyui-output:ro
+      - /opt/social-auto-upload-SOS/state/input:/workspace/social-media-input
+      - /opt/social-auto-upload-SOS/state/cookies:/opt/social-auto-upload/cookies
+      - /opt/social-auto-upload-SOS/state/logs:/opt/social-auto-upload/logs
+      - /opt/social-auto-upload-SOS/skills:/opt/data/external-skills/social-auto-upload:ro
+    working_dir: /workspace
+    command: ["gateway", "run"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s

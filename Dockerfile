@@ -70,7 +70,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 # hermes process, the dashboard, and per-profile gateways.
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-    ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils && \
+    ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git patch openssh-client docker-cli xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 # Prefer the fixed SQLite over Debian's vulnerable libsqlite3.so.0. Keep the
@@ -150,6 +150,32 @@ COPY --chmod=0755 docker/tini-shim.sh /usr/bin/tini
 RUN useradd -u 10000 -m -d /opt/data hermes
 
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+
+# social-auto-upload currently requires Python <3.13, while Hermes runs on
+# Python 3.13. Install a uv-managed Python 3.12 and venv entirely below
+# /opt/social-auto-upload so neither /usr/local nor Hermes' own venv is
+# overwritten. The Agent still invokes the upstream `sau` CLI directly.
+ARG SAU_GIT_SHA=008e4ff66abdf48eb1f4b999272ef979711af436
+RUN git init /opt/social-auto-upload && \
+    git -C /opt/social-auto-upload remote add origin https://github.com/dreammis/social-auto-upload.git && \
+    git -C /opt/social-auto-upload fetch --depth 1 origin "${SAU_GIT_SHA}" && \
+    git -C /opt/social-auto-upload checkout --detach FETCH_HEAD && \
+    rm -rf /opt/social-auto-upload/.git
+COPY docker/social-auto-upload-douyin-qr.patch /tmp/social-auto-upload-douyin-qr.patch
+RUN cd /opt/social-auto-upload && \
+    patch -p1 < /tmp/social-auto-upload-douyin-qr.patch && \
+    cp conf.example.py conf.py && \
+    UV_PYTHON_INSTALL_DIR=/opt/social-auto-upload/.uv-python \
+        uv python install --managed-python --no-bin 3.12 && \
+    UV_PYTHON_INSTALL_DIR=/opt/social-auto-upload/.uv-python \
+        uv venv --managed-python --python 3.12 /opt/social-auto-upload/.venv && \
+    uv pip install --python /opt/social-auto-upload/.venv/bin/python \
+        --no-cache-dir -e . && \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/social-auto-upload/.patchright \
+        /opt/social-auto-upload/.venv/bin/patchright install chromium && \
+    mkdir -p cookies logs && \
+    chmod -R a+rX /opt/social-auto-upload && \
+    rm /tmp/social-auto-upload-douyin-qr.patch
 
 # Node 26: copy the node binary plus the bundled npm JS install from the
 # upstream image.  npm and npx are recreated as symlinks because they're
@@ -354,6 +380,7 @@ RUN mkdir -p /etc/cont-init.d && \
         > /etc/cont-init.d/01-hermes-setup && \
     chmod +x /etc/cont-init.d/01-hermes-setup
 COPY --chmod=0755 docker/cont-init.d/015-supervise-perms /etc/cont-init.d/015-supervise-perms
+COPY --chmod=0755 docker/cont-init.d/014-sau-runtime /etc/cont-init.d/014-sau-runtime
 COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-reconcile-profiles
 
 # ---------- Runtime ----------
@@ -405,6 +432,7 @@ ENV HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages
 # the opt-out env var (HERMES_DOCKER_EXEC_AS_ROOT=1).
 COPY --chmod=0755 docker/hermes-exec-shim.sh /opt/hermes/bin/hermes
 COPY --chmod=0755 docker/entrypoint-dispatch.sh /opt/hermes/docker/entrypoint-dispatch.sh
+COPY --chmod=0755 docker/sau-exec-wrapper.sh /opt/hermes/bin/sau
 
 # Pre-s6 entrypoint.sh did `source .venv/bin/activate` which exported
 # the venv bin onto PATH; Architecture B's main-wrapper.sh does the
@@ -418,7 +446,8 @@ COPY --chmod=0755 docker/entrypoint-dispatch.sh /opt/hermes/docker/entrypoint-di
 # binary by absolute path, so this PATH ordering is transparent to
 # every other consumer.
 ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}"
-RUN mkdir -p /opt/data
+RUN mkdir -p /opt/data && \
+    ln -sf /opt/hermes/bin/sau /usr/local/bin/sau
 VOLUME [ "/opt/data" ]
 
 # The image ENTRYPOINT is a tiny dispatcher rather than `/init` directly.
