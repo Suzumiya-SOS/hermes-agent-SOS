@@ -80,6 +80,17 @@ class TestAvailability:
         monkeypatch.setenv("OPENAI_API_KEY", "test")
         assert openai_plugin.OpenAIImageGenProvider().is_available() is True
 
+    def test_configured_key_env_available(self, tmp_path, monkeypatch):
+        import yaml
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("COMPATIBLE_IMAGE_KEY", "test")
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"key_env": "COMPATIBLE_IMAGE_KEY"}}})
+        )
+
+        assert openai_plugin.OpenAIImageGenProvider().is_available() is True
+
 
 # ── Model resolution ────────────────────────────────────────────────────────
 
@@ -101,6 +112,32 @@ class TestModelResolution:
         model_id, meta = openai_plugin._resolve_model()
         assert model_id == "gpt-image-2-low"
         assert meta["quality"] == "low"
+
+
+class TestClientConfig:
+    def test_defaults_to_openai_key_and_sdk_url(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "default-key")
+
+        assert openai_plugin._resolve_client_config() == (
+            "default-key", None, "OPENAI_API_KEY",
+        )
+
+    def test_compatible_endpoint_and_key_env(self, tmp_path, monkeypatch):
+        import yaml
+
+        monkeypatch.setenv("COMPATIBLE_IMAGE_KEY", "compatible-key")
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+            "image_gen": {
+                "openai": {
+                    "base_url": "http://localhost:8080/v1/",
+                    "key_env": "COMPATIBLE_IMAGE_KEY",
+                }
+            }
+        }))
+
+        assert openai_plugin._resolve_client_config() == (
+            "compatible-key", "http://localhost:8080/v1", "COMPATIBLE_IMAGE_KEY",
+        )
 
 
 # ── Generate ────────────────────────────────────────────────────────────────
@@ -171,6 +208,33 @@ class TestGenerate:
         # gpt-image-2 rejects response_format — we must NOT send it.
         assert "response_format" not in call_kwargs
 
+    def test_compatible_base_url_is_passed_to_sdk(self, tmp_path, monkeypatch):
+        import yaml
+
+        monkeypatch.setenv("COMPATIBLE_IMAGE_KEY", "compatible-key")
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+            "image_gen": {
+                "provider": "openai",
+                "model": "gpt-image-2-low",
+                "openai": {
+                    "base_url": "http://localhost:8080/v1",
+                    "key_env": "COMPATIBLE_IMAGE_KEY",
+                },
+            }
+        }))
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value = fake_client
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            result = openai_plugin.OpenAIImageGenProvider().generate("a cat")
+
+        assert result["success"] is True
+        fake_openai.OpenAI.assert_called_once_with(
+            api_key="compatible-key", base_url="http://localhost:8080/v1",
+        )
+
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),
         ("gpt-image-2-medium", "medium"),
@@ -239,4 +303,3 @@ class TestGenerate:
         assert result["image"].startswith("/")
         assert "example.com" not in result["image"]
         mock_save_url.assert_called_once()
-

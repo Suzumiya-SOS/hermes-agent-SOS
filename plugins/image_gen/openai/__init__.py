@@ -19,6 +19,18 @@ Selection precedence (first hit wins):
 2. ``image_gen.openai.model`` in ``config.yaml``
 3. ``image_gen.model`` in ``config.yaml`` (when it's one of our tier IDs)
 4. :data:`DEFAULT_MODEL` — ``gpt-image-2-medium``
+
+Compatible OpenAI endpoints can be selected with ``image_gen.openai`` in
+``config.yaml``::
+
+    image_gen:
+      provider: openai
+      openai:
+        base_url: http://localhost:8080/v1
+        key_env: COMPATIBLE_OPENAI_API_KEY
+
+When omitted, the provider keeps using OpenAI's default API URL and
+``OPENAI_API_KEY``.
 """
 
 from __future__ import annotations
@@ -119,6 +131,27 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
+def _resolve_client_config() -> Tuple[Optional[str], Optional[str], str]:
+    """Return ``(api_key, base_url, key_env)`` for the image client.
+
+    ``key_env`` lets a named/custom chat provider reuse its existing secret
+    without duplicating credentials under ``OPENAI_API_KEY``. ``base_url`` is
+    optional so ordinary OpenAI users continue to get the SDK default.
+    """
+    cfg = _load_openai_config()
+    openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
+
+    raw_key_env = openai_cfg.get("key_env") if isinstance(openai_cfg, dict) else None
+    key_env = raw_key_env.strip() if isinstance(raw_key_env, str) else ""
+    if not key_env:
+        key_env = "OPENAI_API_KEY"
+
+    raw_base_url = openai_cfg.get("base_url") if isinstance(openai_cfg, dict) else None
+    base_url = raw_base_url.strip().rstrip("/") if isinstance(raw_base_url, str) else ""
+
+    return get_secret(key_env), base_url or None, key_env
+
+
 # ---------------------------------------------------------------------------
 # Source-image loading (for image-to-image / edit)
 # ---------------------------------------------------------------------------
@@ -174,7 +207,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
         return "OpenAI"
 
     def is_available(self) -> bool:
-        if not get_secret("OPENAI_API_KEY"):
+        api_key, _, _ = _resolve_client_config()
+        if not api_key:
             return False
         try:
             import openai  # noqa: F401
@@ -236,13 +270,13 @@ class OpenAIImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        api_key = get_secret("OPENAI_API_KEY")
+        api_key, base_url, key_env = _resolve_client_config()
         if not api_key:
             return error_response(
                 error=(
-                    "OPENAI_API_KEY not set. Run `hermes tools` → Image "
-                    "Generation → OpenAI to configure, or `hermes setup` "
-                    "to add the key."
+                    f"{key_env} not set. Run `hermes tools` → Image Generation "
+                    "→ OpenAI to configure, or set image_gen.openai.key_env "
+                    "to an existing compatible-provider credential."
                 ),
                 error_type="auth_required",
                 provider="openai",
@@ -272,7 +306,10 @@ class OpenAIImageGenProvider(ImageGenProvider):
         is_edit = bool(sources)
         modality = "image" if is_edit else "text"
 
-        client = openai.OpenAI(api_key=api_key)
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        client = openai.OpenAI(**client_kwargs)
 
         if is_edit:
             # images.edit() expects file-like objects. Download/read each

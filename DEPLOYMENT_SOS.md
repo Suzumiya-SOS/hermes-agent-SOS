@@ -8,6 +8,12 @@
 - Native image input: enabled with `model.supports_vision: true`; OpenAI-style
   `image_url`/`input_image` parts are forwarded to the upstream model instead
   of being flattened to text.
+- Hermes image generation: `image_gen.provider: openai` routes `image_generate`
+  to the compatible `/v1/images/*` endpoints at `http://127.0.0.1:8080/v1`.
+  It reuses `SOS_OPENAI_API_KEY` through `image_gen.openai.key_env`; the default
+  profile uses the low-cost `gpt-image-2-low` tier. Open WebUI users should ask
+  the `hermes-agent` model to generate or edit an image so the request remains
+  inside Hermes and the result is returned as an inline image.
 - Publisher API: `http://192.168.1.18:5410`
 
 Dashboard and both APIs require authentication. Runtime credentials are stored
