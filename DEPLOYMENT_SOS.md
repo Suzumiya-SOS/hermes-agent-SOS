@@ -5,6 +5,9 @@
 - Dashboard: `http://192.168.1.18:9119`
 - OpenAI-compatible Agent API: `http://192.168.1.18:8642/v1`
 - Model route: `sos-openai` → `http://127.0.0.1:8080/v1` → `gpt-5.6`
+- Native image input: enabled with `model.supports_vision: true`; OpenAI-style
+  `image_url`/`input_image` parts are forwarded to the upstream model instead
+  of being flattened to text.
 - Publisher API: `http://192.168.1.18:5410`
 
 Dashboard and both APIs require authentication. Runtime credentials are stored
@@ -34,4 +37,3 @@ The `social-auto-upload` skill is installed in
 
 Real upload jobs require both explicit user confirmation and
 `confirm_publish: true`.
-
